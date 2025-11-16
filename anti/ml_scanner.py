@@ -1,69 +1,40 @@
-# ml_scanner.py
 import os
-import math
-import pickle
+import numpy as np
+import joblib
+import hashlib
 
-class MLScanner:
-    MODEL_PATH = os.path.join("models", "ml_detector.pkl")
-    SCALER_PATH = os.path.join("models", "scaler.pkl")
+MODEL_PATH = "models/ml_detector.pkl"
+SCALER_PATH = "models/scaler.pkl"
 
-    def __init__(self):
-        self.model = None
-        self.scaler = None
+# Load trained model and scaler
+model = joblib.load(MODEL_PATH)
+scaler = joblib.load(SCALER_PATH)
 
-        # Load model
-        if os.path.exists(self.MODEL_PATH):
-            with open(self.MODEL_PATH, "rb") as f:
-                self.model = pickle.load(f)
-        else:
-            print("[!] ML model not found, skipping ML scan.")
+def extract_static_features(file_path):
+    """
+    Extracts basic static features from a file.
+    (For demonstration; can be replaced with real PE analysis for malware files)
+    """
+    try:
+        size = os.path.getsize(file_path)
+        with open(file_path, "rb") as f:
+            data = f.read()
+        entropy = -np.sum([p * np.log2(p) for p in np.bincount(np.frombuffer(data, dtype=np.uint8)) / len(data) if p > 0])
+        md5 = int(hashlib.md5(data).hexdigest(), 16) % (10 ** 8)
+        return np.array([size, entropy, md5])
+    except Exception as e:
+        print(f"Error extracting features from {file_path}: {e}")
+        return np.zeros(3)
 
-        # Load scaler
-        if os.path.exists(self.SCALER_PATH):
-            with open(self.SCALER_PATH, "rb") as f:
-                self.scaler = pickle.load(f)
+def predict_file(file_path):
+    features = extract_static_features(file_path).reshape(1, -1)
+    features_scaled = scaler.transform(features)
+    prediction = model.predict(features_scaled)[0]
+    label = "Malicious" if prediction == 1 else "Benign"
+    print(f"[+] File: {file_path} → {label}")
+    return label
 
-    def _file_entropy(self, path):
-        """Calculate Shannon entropy of the file contents."""
-        try:
-            with open(path, "rb") as f:
-                data = f.read()
-            if not data:
-                return 0.0
-            freq = [0] * 256
-            for b in data:
-                freq[b] += 1
-            entropy = 0.0
-            for c in freq:
-                if c == 0: 
-                    continue
-                p = c / len(data)
-                entropy -= p * math.log2(p)
-            return entropy
-        except Exception:
-            return 0.0
-
-    def _extract_features(self, path):
-        """Extract simple static features from file."""
-        try:
-            size = os.path.getsize(path)
-            entropy = self._file_entropy(path)
-            ext = os.path.splitext(path)[1].lower()
-            risky_ext = int(ext in {".exe", ".dll", ".vbs", ".js", ".jar", ".scr", ".bat"})
-            return [[size, entropy, risky_ext]]
-        except Exception:
-            return [[0, 0.0, 0]]
-
-    def scan(self, file_path):
-        """Return True if file is malicious according to ML model."""
-        if not self.model:
-            return False  # fallback if no model
-        try:
-            X = self._extract_features(file_path)
-            if self.scaler:
-                X = self.scaler.transform(X)
-            proba = self.model.predict_proba(X)[0][1]  # malware probability
-            return proba >= 0.5  # threshold
-        except Exception as e:
-            print("[MLScanner] Error:", e)
-            return False
+# Example use:
+if __name__ == "__main__":
+    test_file = "dataset/sample_test.exe"  # replace with actual file path
+    predict_file(test_file)

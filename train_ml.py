@@ -1,95 +1,151 @@
-# train_ml.py
 import os
+import random
 import math
-import pickle
-import numpy as np
+import csv
 import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.svm import SVC
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from xgboost import XGBClassifier
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, confusion_matrix
+import joblib
+import warnings
+warnings.filterwarnings("ignore")
 
-# === Feature extraction (same as ml_scanner.py) ===
-def file_entropy(path):
+# ========== STEP 1: Dummy Data Generation ==========
+def generate_dummy_files():
+    os.makedirs("dataset/benign", exist_ok=True)
+    os.makedirs("dataset/malicious", exist_ok=True)
+
+    # Create benign files
+    for i in range(30):
+        path = f"dataset/benign/file{i}.txt"
+        with open(path, "w") as f:
+            f.write("SAFE_FILE_CONTENT_" + "A" * random.randint(100, 1000))
+
+    # Create malicious files
+    for i in range(30):
+        path = f"dataset/malicious/malware{i}.exe"
+        with open(path, "w") as f:
+            f.write("MALWARE_PAYLOAD_" + "X" * random.randint(500, 2000))
+
+    print("[+] Dummy benign and malicious files generated.")
+
+
+# ========== STEP 2: Feature Extraction ==========
+def calculate_entropy(data):
+    """Simple Shannon entropy calculation."""
+    if not data:
+        return 0
+    entropy = 0
+    for x in set(data):
+        p_x = float(data.count(x)) / len(data)
+        entropy += -p_x * math.log2(p_x)
+    return entropy
+
+
+def extract_features(file_path):
     try:
-        with open(path, "rb") as f:
-            data = f.read()
-        if not data:
-            return 0.0
-        freq = [0] * 256
-        for b in data:
-            freq[b] += 1
-        entropy = 0.0
-        for c in freq:
-            if c == 0:
-                continue
-            p = c / len(data)
-            entropy -= p * math.log2(p)
-        return entropy
-    except Exception:
-        return 0.0
+        size = os.path.getsize(file_path)
+        ext = os.path.splitext(file_path)[1]
+        with open(file_path, "rb") as f:
+            content = f.read(1024)  # limit for speed
+            entropy = calculate_entropy(list(content))
+        return [file_path, size, entropy, ext]
+    except Exception as e:
+        return [file_path, 0, 0, ""]
 
-def extract_features(path):
-    try:
-        size = os.path.getsize(path)
-        entropy = file_entropy(path)
-        ext = os.path.splitext(path)[1].lower()
-        risky_ext = int(ext in {".exe", ".dll", ".vbs", ".js", ".jar", ".scr", ".bat"})
-        return [size, entropy, risky_ext]
-    except Exception:
-        return [0, 0.0, 0]
 
-# === Build dataset ===
-def build_dataset(benign_dir, malicious_dir):
-    data = []
-    labels = []
+# ========== STEP 3: Dataset Creation ==========
+def create_dataset_csv():
+    rows = []
 
-    for root, _, files in os.walk(benign_dir):
-        for f in files:
-            path = os.path.join(root, f)
-            data.append(extract_features(path))
-            labels.append(0)  # 0 = benign
+    # Process benign files
+    for file in os.listdir("dataset/benign"):
+        file_path = os.path.join("dataset/benign", file)
+        rows.append(extract_features(file_path) + [0])  # label 0 = benign
 
-    for root, _, files in os.walk(malicious_dir):
-        for f in files:
-            path = os.path.join(root, f)
-            data.append(extract_features(path))
-            labels.append(1)  # 1 = malicious
+    # Process malicious files
+    for file in os.listdir("dataset/malicious"):
+        file_path = os.path.join("dataset/malicious", file)
+        rows.append(extract_features(file_path) + [1])  # label 1 = malicious
 
-    return np.array(data), np.array(labels)
+    csv_path = "dataset/dummy_dataset.csv"
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["file_path", "size", "entropy", "extension", "label"])
+        writer.writerows(rows)
 
-# === Training pipeline ===
-def train_model(benign_dir="dataset/benign", malicious_dir="dataset/malicious"):
-    X, y = build_dataset(benign_dir, malicious_dir)
-    if len(X) == 0:
-        print("❌ No training data found. Add files to dataset folders.")
-        return
+    print(f"[+] Dataset CSV created at {csv_path}")
+    return csv_path
 
-    # Train-test split
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
 
-    # Scale features
-    scaler = StandardScaler().fit(X_train)
-    X_train = scaler.transform(X_train)
-    X_test = scaler.transform(X_test)
+# ========== STEP 4: Train and Compare ML Models ==========
+def train_and_compare_models(dataset_path):
+    print("[+] Loading dataset...")
+    df = pd.read_csv(dataset_path)
 
-    # Train XGBoost model
-    model = XGBClassifier(n_estimators=200, use_label_encoder=False, eval_metric="logloss")
-    model.fit(X_train, y_train)
+    df["extension"] = df["extension"].astype("category").cat.codes
+    X = df[["size", "entropy", "extension"]]
+    y = df["label"]
 
-    # Evaluate
-    print("✅ Train Accuracy:", model.score(X_train, y_train))
-    print("✅ Test Accuracy:", model.score(X_test, y_test))
+    # Add small noise so model doesn’t overfit perfectly
+    X["entropy"] += np.random.normal(0, 0.05, X.shape[0])
 
-    # Save model + scaler
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+
+    models = {
+        "Random Forest": RandomForestClassifier(n_estimators=100, random_state=42),
+        "Decision Tree": DecisionTreeClassifier(random_state=42),
+        "SVM": SVC(kernel="rbf", probability=True, random_state=42)
+    }
+
+    results = []
+    best_model = None
+    best_f1 = 0
+
+    for name, model in models.items():
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        y_proba = model.predict_proba(X_test)[:, 1] if hasattr(model, "predict_proba") else y_pred
+
+        acc = accuracy_score(y_test, y_pred)
+        f1 = f1_score(y_test, y_pred)
+        auc = roc_auc_score(y_test, y_proba)
+        tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
+        tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
+        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
+
+        results.append((name, acc, f1, auc, tpr, fpr))
+
+        print(f"\n=== {name} ===")
+        print(f"Accuracy: {acc:.4f}")
+        print(f"F1-Score: {f1:.4f}")
+        print(f"AUC-ROC: {auc:.4f}")
+        print(f"TPR: {tpr:.4f}")
+        print(f"FPR: {fpr:.4f}")
+
+        # Track best model
+        if f1 > best_f1:
+            best_f1 = f1
+            best_model = model
+
+    # Save the best model
     os.makedirs("models", exist_ok=True)
-    with open("models/ml_detector.pkl", "wb") as f:
-        pickle.dump(model, f)
-    with open("models/scaler.pkl", "wb") as f:
-        pickle.dump(scaler, f)
+    joblib.dump(best_model, "models/ml_detector.pkl")
+    print("\n[+] Best model saved as models/ml_detector.pkl")
 
-    print("🎉 Model and scaler saved in /models/")
+    # Display summary table
+    print("\n=== Summary of All Models ===")
+    print("{:<15} {:<10} {:<10} {:<10} {:<10} {:<10}".format("Model", "Acc", "F1", "AUC", "TPR", "FPR"))
+    for name, acc, f1, auc, tpr, fpr in results:
+        print(f"{name:<15} {acc:<10.4f} {f1:<10.4f} {auc:<10.4f} {tpr:<10.4f} {fpr:<10.4f}")
 
+
+# ========== MAIN EXECUTION ==========
 if __name__ == "__main__":
-    train_model()
+    print("[*] Starting ML training pipeline...")
+    generate_dummy_files()
+    dataset_path = create_dataset_csv()
+    train_and_compare_models(dataset_path)
